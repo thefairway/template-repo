@@ -1,0 +1,69 @@
+package userregistered
+
+import (
+	"context"
+	"log"
+
+	"github.com/err0r500/fairway"
+	"github.com/err0r500/fairway-template/automate"
+	"github.com/err0r500/fairway-template/event"
+	"github.com/err0r500/fairway/dcb"
+)
+
+func init() {
+	Register(&automate.Registry)
+}
+
+// Deps for this automation
+type Deps struct {
+	EmailSender automate.EmailSender
+}
+
+type command struct {
+	UserId, Email, Name string
+}
+
+// Register adds this automation to the registry (public for tests)
+func Register(registry *fairway.AutomationRegistry[automate.AllDeps]) {
+	registry.RegisterAutomation(
+		func(store dcb.DcbStore, deps automate.AllDeps) (fairway.Startable, error) {
+			return fairway.NewAutomation(
+				store,                               // DCB store
+				Deps{EmailSender: deps.EmailSender}, // provide the dependencies implementations to the command
+				"welcome-email",                     // unique queue identifier
+				event.UserRegistered{},              // the event-type that triggers the automation
+				eventToCommand,                      // mapping to construct the command from the trigger event
+			)
+		},
+	)
+}
+
+func eventToCommand(ev fairway.Event) fairway.CommandWithEffect[Deps] {
+	data := ev.Data.(event.UserRegistered)
+	return command{UserId: data.Id, Email: data.Email, Name: data.Name}
+}
+
+func (c command) Run(ctx context.Context, ra fairway.EventReadAppenderExtended, deps Deps) error {
+	alreadySent := false
+
+	if err := ra.ReadEvents(ctx, fairway.QueryItems(
+		fairway.NewQueryItem().Types(event.UserWelcomeEmailSent{}).Tags(event.UserIdTag(c.UserId)),
+	), func(e fairway.Event) bool {
+		// if a single event is returned, it means the email has already been sent
+		alreadySent = true
+		return false
+	}); err != nil {
+		return err
+	}
+
+	if alreadySent {
+		return nil
+	}
+
+	if err := deps.EmailSender.SendWelcomeEmail(ctx, c.Email, c.Name); err != nil {
+		log.Println(err)
+		return err
+	}
+
+	return ra.AppendEventsNoCondition(ctx, fairway.NewEvent(event.UserWelcomeEmailSent{UserId: c.UserId}))
+}
